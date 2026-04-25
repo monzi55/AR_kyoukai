@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AR境界可視化 WebApp Prototype</title>
+    <style>
+        :root {
+            --primary: #ff3b30;
+            --secondary: #007aff;
+            --bg: #1c1c1e;
+            --text: #ffffff;
+            --glass: rgba(28, 28, 30, 0.8);
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        #ui-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        #header {
+            padding: 20px;
+            background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0) 100%);
+            pointer-events: auto;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.2rem;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        #controls {
+            margin-top: auto;
+            padding: 20px;
+            background: var(--glass);
+            backdrop-filter: blur(10px);
+            border-top: 1px solid rgba(255,255,255,0.1);
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        button, label.file-label {
+            flex: 1;
+            padding: 16px;
+            border-radius: 12px;
+            border: none;
+            font-size: 1rem;
+            font-weight: bold;
+            text-align: center;
+            cursor: pointer;
+            transition: transform 0.1s, opacity 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        .btn-primary { background-color: var(--primary); color: white; }
+        .btn-secondary { background-color: var(--secondary); color: white; }
+        .btn-disabled { background-color: #48484a; color: #8e8e93; cursor: not-allowed; }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        #debug-log {
+            height: 100px;
+            background: rgba(0,0,0,0.5);
+            border-radius: 8px;
+            padding: 8px;
+            font-family: monospace;
+            font-size: 0.75rem;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            color: #32d74b;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        #ar-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .reticle {
+            width: 40px;
+            height: 40px;
+            border: 3px solid white;
+            border-radius: 50%;
+            opacity: 0.6;
+        }
+
+        .reticle::after {
+            content: '';
+            display: block;
+            width: 4px;
+            height: 4px;
+            background: white;
+            margin: 15px;
+            border-radius: 50%;
+        }
+
+        /* WebXR Button positioning override */
+        #ARButton {
+            bottom: 160px !important; /* Move it above our controls */
+        }
+    </style>
+</head>
+<body>
+    <div id="ui-container">
+        <div id="header">
+            <h1>AR境界可視化 Prototye</h1>
+            <div id="status">SIMAファイルを読み込んでください</div>
+        </div>
+
+        <div id="ar-overlay">
+            <div class="reticle"></div>
+            <div style="text-shadow: 0 1px 4px black;">地面をタップして配置</div>
+        </div>
+
+        <div id="controls">
+            <div id="debug-log">システム待機中...</div>
+            <div class="btn-group">
+                <label class="file-label btn-secondary" for="file-input">
+                    📂 SIMA読み込み
+                </label>
+                <input type="file" id="file-input" accept=".sim,.txt">
+                <button id="place-btn" class="btn-primary btn-disabled" disabled>
+                    📍 AR空間に配置
+                </button>
+            </div>
+            <button id="reset-btn" class="btn-secondary" style="background-color: #3a3a3c;">
+                🔄 リセット
+            </button>
+        </div>
+    </div>
+
+    <!-- Three.js and WebXR utilities -->
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+        // --- Logger ---
+        const logElement = document.getElementById('debug-log');
+        function log(message, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            const entry = `[${time}] ${message}\n`;
+            logElement.innerText += entry;
+            logElement.scrollTop = logElement.scrollHeight;
+            console.log(message);
+        }
+
+        // --- SIMA Parser ---
+        class SIMAParser {
+            static async parse(file) {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const buffer = e.target.result;
+                            // Shift-JISでデコード
+                            const decoder = new TextDecoder('shift-jis');
+                            const text = decoder.decode(buffer);
+                            const lines = text.split(/\r?\n/);
+                            
+                            const data = {
+                                points: [],      // { name, x, y, type }
+                                connections: [], // [ [p1, p2], ... ]
+                                center: { x: 0, y: 0 }
+                            };
+
+                            let sumX = 0, sumY = 0, count = 0;
+
+                            lines.forEach(line => {
+                                const parts = line.split(',');
+                                const type = parts[0];
+
+                                if (type === 'A01') {
+                                    // A01,点名,コード,X,Y,H
+                                    const name = parts[1];
+                                    const x = parseFloat(parts[3]);
+                                    const y = parseFloat(parts[4]);
+                                    
+                                    if (!isNaN(x) && !isNaN(y)) {
+                                        data.points.push({ name, x, y, type: 'boundary' });
+                                        sumX += x;
+                                        sumY += y;
+                                        count++;
+                                    }
+                                } else if (type === 'A02') {
+                                    // A02 (引照点/準拠点)
+                                    const name = parts[1];
+                                    const x = parseFloat(parts[3]);
+                                    const y = parseFloat(parts[4]);
+                                    if (!isNaN(x) && !isNaN(y)) {
+                                        data.points.push({ name, x, y, type: 'reference' });
+                                    }
+                                } else if (type === 'B01') {
+                                    // B01のすべての要素を保存（後で実在する点名のみを抽出して結線する）
+                                    data.connections.push(parts.slice(1));
+                                }
+                            });
+
+                            if (count > 0) {
+                                data.center.x = sumX / count;
+                                data.center.y = sumY / count;
+                            }
+
+                            resolve(data);
+                        } catch (err) {
+                            reject(err);
+                        }
+                    };
+                    reader.onerror = reject;
+                    reader.readAsArrayBuffer(file);
+                });
+            }
+        }
+
+        // --- AR App ---
+        class ARApp {
+            constructor() {
+                this.container = document.createElement('div');
+                document.body.appendChild(this.container);
+
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+                
+                this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+                this.renderer.setPixelRatio(window.devicePixelRatio);
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.xr.enabled = true;
+                this.container.appendChild(this.renderer.domElement);
+
+                // Lighting
+                const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+                light.position.set(0.5, 1, 0.25);
+                this.scene.add(light);
+
+                // AR UI
+                this.setupARButton();
+                
+                // Hit Test
+                this.hitTestSource = null;
+                this.hitTestSourceRequested = false;
+                this.reticle = new THREE.Mesh(
+                    new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
+                    new THREE.MeshBasicMaterial({ color: 0xffffff })
+                );
+                this.reticle.matrixAutoUpdate = false;
+                this.reticle.visible = false;
+                this.scene.add(this.reticle);
+
+                // Data Objects
+                this.mapGroup = new THREE.Group();
+                this.scene.add(this.mapGroup);
+                this.simaData = null;
+                this.isPlaced = false;
+
+                window.addEventListener('resize', () => this.onWindowResize());
+                
+                // Interaction
+                this.controller = this.renderer.xr.getController(0);
+                this.controller.addEventListener('select', () => this.onSelect());
+                this.scene.add(this.controller);
+            }
+
+            setupARButton() {
+                const btn = ARButton.createButton(this.renderer, {
+                    requiredFeatures: ['hit-test'],
+                    optionalFeatures: ['dom-overlay'],
+                    domOverlay: { root: document.getElementById('ui-container') }
+                });
+                document.body.appendChild(btn);
+            }
+
+            onWindowResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+
+            loadSIMA(data) {
+                this.simaData = data;
+                this.clearMap();
+                
+                // 3Dオブジェクトの作成
+                const pointGeom = new THREE.SphereGeometry(0.05, 16, 16); // 直径10cm
+                const refGeom = new THREE.BoxGeometry(0.08, 0.08, 0.08); // 準拠点用立方体
+
+                const boundMat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+                const refMat = new THREE.MeshStandardMaterial({ color: 0x007aff });
+
+                const pointMap = new Map();
+
+                data.points.forEach(p => {
+                    // 座標変換: SIMA Y -> Three X, SIMA X -> Three -Z
+                    // 基準点(center)からの相対座標
+                    const relX = p.y - data.center.y;
+                    const relZ = -(p.x - data.center.x);
+
+                    const mesh = new THREE.Mesh(
+                        p.type === 'boundary' ? pointGeom : refGeom,
+                        p.type === 'boundary' ? boundMat : refMat
+                    );
+                    mesh.position.set(relX, 0, relZ);
+                    this.mapGroup.add(mesh);
+                    pointMap.set(p.name, mesh.position.clone());
+                    
+                    // ラベル代わりの小さな点（見やすさ用）
+                    log(`点追加: ${p.name} (X:${p.x.toFixed(3)}, Y:${p.y.toFixed(3)})`);
+                });
+
+                // 結線 (B01などのパーツ配列から実在する点名のみを抽出して繋ぐ)
+                const lineMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 2 });
+                data.connections.forEach(parts => {
+                    const validPoints = parts.filter(part => pointMap.has(part));
+                    for (let i = 0; i < validPoints.length - 1; i++) {
+                        const p1 = pointMap.get(validPoints[i]);
+                        const p2 = pointMap.get(validPoints[i+1]);
+                        const geometry = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+                        const line = new THREE.Line(geometry, lineMat);
+                        this.mapGroup.add(line);
+                    }
+                    // 閉じる場合は最後と最初を結ぶ
+                    if (validPoints.length > 2) {
+                        const p1 = pointMap.get(validPoints[validPoints.length - 1]);
+                        const p2 = pointMap.get(validPoints[0]);
+                        const geometry = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+                        const line = new THREE.Line(geometry, lineMat);
+                        this.mapGroup.add(line);
+                    }
+                });
+
+                this.mapGroup.visible = false;
+                log(`読み込み完了: 点数 ${data.points.length}, 結線数 ${data.connections.length}`);
+            }
+
+            clearMap() {
+                while(this.mapGroup.children.length > 0){ 
+                    this.mapGroup.remove(this.mapGroup.children[0]); 
+                }
+                this.isPlaced = false;
+            }
+
+            onSelect() {
+                if (this.reticle.visible && this.simaData && !this.isPlaced) {
+                    this.mapGroup.position.setFromMatrixPosition(this.reticle.matrix);
+                    this.mapGroup.visible = true;
+                    this.isPlaced = true;
+                    log("AR空間に配置しました");
+                    document.getElementById('ar-overlay').style.display = 'none';
+                }
+            }
+
+            animate() {
+                this.renderer.setAnimationLoop((timestamp, frame) => this.render(timestamp, frame));
+            }
+
+            render(timestamp, frame) {
+                if (frame) {
+                    const referenceSpace = this.renderer.xr.getReferenceSpace();
+                    const session = this.renderer.xr.getSession();
+
+                    if (this.hitTestSourceRequested === false) {
+                        session.requestReferenceSpace('viewer').then((referenceSpace) => {
+                            session.requestHitTestSource({ space: referenceSpace }).then((source) => {
+                                this.hitTestSource = source;
+                            });
+                        });
+                        session.addEventListener('end', () => {
+                            this.hitTestSourceRequested = false;
+                            this.hitTestSource = null;
+                        });
+                        this.hitTestSourceRequested = true;
+                    }
+
+                    if (this.hitTestSource) {
+                        const hitTestResults = frame.getHitTestResults(this.hitTestSource);
+                        if (hitTestResults.length) {
+                            const hit = hitTestResults[0];
+                            const pose = hit.getPose(referenceSpace);
+                            if (pose) {
+                                this.reticle.visible = true;
+                                this.reticle.matrix.fromArray(pose.transform.matrix);
+                            } else {
+                                this.reticle.visible = false;
+                            }
+                        } else {
+                            this.reticle.visible = false;
+                        }
+                    }
+                }
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+
+        // --- Initialization ---
+        const app = new ARApp();
+        app.animate();
+
+        const fileInput = document.getElementById('file-input');
+        const placeBtn = document.getElementById('place-btn');
+        const resetBtn = document.getElementById('reset-btn');
+
+        fileInput.addEventListener('change', async (e) => {
+            if (e.target.files.length > 0) {
+                const file = e.target.files[0];
+                log(`ファイル選択: ${file.name}`);
+                try {
+                    const data = await SIMAParser.parse(file);
+                    app.loadSIMA(data);
+                    document.getElementById('status').innerText = `読込済: ${file.name}`;
+                    placeBtn.disabled = false;
+                    placeBtn.classList.remove('btn-disabled');
+                } catch (err) {
+                    log(`エラー: ${err.message}`, 'error');
+                }
+                e.target.value = ''; // 同じファイルを再選択できるようにリセット
+            }
+        });
+
+        placeBtn.addEventListener('click', () => {
+            if (!app.simaData) return;
+            app.isPlaced = false; // 再配置を許可
+            log("ARモードを開始して地面をタップしてください");
+            document.getElementById('ar-overlay').style.display = 'flex';
+            // すでにARセッション中なら、即座に配置待ち状態へ
+        });
+
+        resetBtn.addEventListener('click', () => {
+            app.clearMap();
+            app.mapGroup.visible = false;
+            document.getElementById('status').innerText = "SIMAファイルを読み込んでください";
+            placeBtn.disabled = true;
+            placeBtn.classList.add('btn-disabled');
+            log("リセットしました");
+        });
+
+    </script>
+</body>
+</html>
