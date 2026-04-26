@@ -150,11 +150,21 @@
 
         <div id="ar-overlay">
             <div class="reticle"></div>
-            <div style="text-shadow: 0 1px 4px black;">地面をタップして配置</div>
+            <div id="ar-guide-msg" style="text-shadow: 0 1px 4px black; font-weight: bold;">1点目をタップしてください</div>
         </div>
 
         <div id="controls">
             <div id="debug-log">システム待機中...</div>
+            <div id="point-selectors" style="display: none; flex-direction: column; gap: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <label for="ref-point-1" style="font-size: 0.9rem;">基準点1:</label>
+                    <select id="ref-point-1" style="flex: 1; margin-left: 10px; padding: 8px; border-radius: 8px; background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.5); font-size: 0.9rem;"></select>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <label for="ref-point-2" style="font-size: 0.9rem;">基準点2:</label>
+                    <select id="ref-point-2" style="flex: 1; margin-left: 10px; padding: 8px; border-radius: 8px; background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.5); font-size: 0.9rem;"></select>
+                </div>
+            </div>
             <div class="btn-group">
                 <label class="file-label btn-secondary" for="file-input">
                     📂 SIMA読み込み
@@ -306,7 +316,22 @@
                 this.mapGroup = new THREE.Group();
                 this.scene.add(this.mapGroup);
                 this.simaData = null;
-                this.isPlaced = false;
+                
+                // State and Points
+                this.pointMap = new Map();
+                this.placeState = 0; // 0: off, 1: wait tap1, 2: wait tap2
+                this.tap1Pos = new THREE.Vector3();
+                this.tap2Pos = new THREE.Vector3();
+                
+                // Tap Markers
+                const markerGeom = new THREE.SphereGeometry(0.04);
+                const markerMat = new THREE.MeshBasicMaterial({color: 0x32d74b});
+                this.marker1 = new THREE.Mesh(markerGeom, markerMat);
+                this.marker2 = new THREE.Mesh(markerGeom, markerMat);
+                this.marker1.visible = false;
+                this.marker2.visible = false;
+                this.scene.add(this.marker1);
+                this.scene.add(this.marker2);
 
                 window.addEventListener('resize', () => this.onWindowResize());
                 
@@ -342,7 +367,12 @@
                 const boundMat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
                 const refMat = new THREE.MeshStandardMaterial({ color: 0x007aff });
 
-                const pointMap = new Map();
+                this.pointMap.clear();
+                
+                const select1 = document.getElementById('ref-point-1');
+                const select2 = document.getElementById('ref-point-2');
+                select1.innerHTML = '';
+                select2.innerHTML = '';
 
                 data.points.forEach(p => {
                     // 座標変換: SIMA Y -> Three X, SIMA X -> Three -Z
@@ -356,11 +386,26 @@
                     );
                     mesh.position.set(relX, 0, relZ);
                     this.mapGroup.add(mesh);
-                    pointMap.set(p.name, mesh.position.clone());
+                    this.pointMap.set(p.name, mesh.position.clone());
+                    
+                    const opt1 = document.createElement('option');
+                    opt1.value = p.name;
+                    opt1.text = p.name;
+                    select1.appendChild(opt1);
+
+                    const opt2 = document.createElement('option');
+                    opt2.value = p.name;
+                    opt2.text = p.name;
+                    select2.appendChild(opt2);
                     
                     // ラベル代わりの小さな点（見やすさ用）
                     log(`点追加: ${p.name} (X:${p.x.toFixed(3)}, Y:${p.y.toFixed(3)})`);
                 });
+
+                if (data.points.length > 1) {
+                    select2.selectedIndex = 1;
+                }
+                document.getElementById('point-selectors').style.display = 'flex';
 
                 // 結線データの配列が空かどうかを判定
                 if (data.connections.length === 0) {
@@ -372,20 +417,20 @@
                     // B01などの結線データに基づいて線を生成する
                     const lineMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 2 });
                     data.connections.forEach(parts => {
-                        const validPoints = parts.filter(part => pointMap.has(part));
+                        const validPoints = parts.filter(part => this.pointMap.has(part));
                         
                         if (validPoints.length > 1) {
                             for (let i = 0; i < validPoints.length - 1; i++) {
-                                const p1 = pointMap.get(validPoints[i]);
-                                const p2 = pointMap.get(validPoints[i+1]);
+                                const p1 = this.pointMap.get(validPoints[i]);
+                                const p2 = this.pointMap.get(validPoints[i+1]);
                                 const geometry = new THREE.BufferGeometry().setFromPoints([p1, p2]);
                                 const line = new THREE.Line(geometry, lineMat);
                                 this.mapGroup.add(line);
                             }
                             // 閉じる場合は最後と最初を結ぶ
                             if (validPoints.length > 2) {
-                                const p1 = pointMap.get(validPoints[validPoints.length - 1]);
-                                const p2 = pointMap.get(validPoints[0]);
+                                const p1 = this.pointMap.get(validPoints[validPoints.length - 1]);
+                                const p2 = this.pointMap.get(validPoints[0]);
                                 const geometry = new THREE.BufferGeometry().setFromPoints([p1, p2]);
                                 const line = new THREE.Line(geometry, lineMat);
                                 this.mapGroup.add(line);
@@ -402,17 +447,89 @@
                 while(this.mapGroup.children.length > 0){ 
                     this.mapGroup.remove(this.mapGroup.children[0]); 
                 }
-                this.isPlaced = false;
+                this.placeState = 0;
+                this.marker1.visible = false;
+                this.marker2.visible = false;
+                document.getElementById('point-selectors').style.display = 'none';
             }
 
             onSelect() {
-                if (this.reticle.visible && this.simaData && !this.isPlaced) {
-                    this.mapGroup.position.setFromMatrixPosition(this.reticle.matrix);
-                    this.mapGroup.visible = true;
-                    this.isPlaced = true;
-                    log("AR空間に配置しました");
+                if (!this.reticle.visible || !this.simaData) return;
+
+                if (this.placeState === 1) {
+                    // Tap 1
+                    this.tap1Pos.setFromMatrixPosition(this.reticle.matrix);
+                    this.marker1.position.copy(this.tap1Pos);
+                    this.marker1.visible = true;
+                    
+                    this.placeState = 2;
+                    document.getElementById('ar-guide-msg').innerText = "2点目をタップしてください";
+                    log("1点目を記録しました。続いて2点目をタップしてください。");
+                } else if (this.placeState === 2) {
+                    // Tap 2
+                    this.tap2Pos.setFromMatrixPosition(this.reticle.matrix);
+                    this.marker2.position.copy(this.tap2Pos);
+                    this.marker2.visible = true;
+
+                    this.placeState = 0; // done
                     document.getElementById('ar-overlay').style.display = 'none';
+                    log("2点目を記録しました。計算を開始します...");
+
+                    this.calculateAndPlace();
                 }
+            }
+
+            calculateAndPlace() {
+                const pt1Name = document.getElementById('ref-point-1').value;
+                const pt2Name = document.getElementById('ref-point-2').value;
+
+                if (!this.pointMap.has(pt1Name) || !this.pointMap.has(pt2Name)) {
+                    log("エラー: 選択された基準点が見つかりません", "error");
+                    return;
+                }
+
+                // SIMA space local coordinates (relative to center)
+                const simaPt1 = this.pointMap.get(pt1Name);
+                const simaPt2 = this.pointMap.get(pt2Name);
+
+                const worldPt1 = this.tap1Pos;
+                const worldPt2 = this.tap2Pos;
+
+                // 1. Calculate Scale
+                const simaDist = new THREE.Vector2(simaPt2.x - simaPt1.x, simaPt2.z - simaPt1.z).length();
+                const worldDist = new THREE.Vector2(worldPt2.x - worldPt1.x, worldPt2.z - worldPt1.z).length();
+                
+                let scale = 1.0;
+                if (simaDist > 0.001) {
+                    scale = worldDist / simaDist;
+                } else {
+                    log("警告: 基準点間の距離が近すぎます", "error");
+                }
+                
+                this.mapGroup.scale.set(scale, scale, scale);
+
+                // 2. Calculate Rotation (Yaw around Y axis)
+                const vSima = new THREE.Vector3(simaPt2.x - simaPt1.x, 0, simaPt2.z - simaPt1.z).normalize();
+                const vWorld = new THREE.Vector3(worldPt2.x - worldPt1.x, 0, worldPt2.z - worldPt1.z).normalize();
+                
+                const quaternion = new THREE.Quaternion().setFromUnitVectors(vSima, vWorld);
+                this.mapGroup.setRotationFromQuaternion(quaternion);
+
+                // 3. Calculate Translation
+                const transformedSimaPt1 = simaPt1.clone().multiplyScalar(scale).applyQuaternion(quaternion);
+                this.mapGroup.position.copy(worldPt1).sub(transformedSimaPt1);
+                
+                this.mapGroup.visible = true;
+                
+                const euler = new THREE.Euler().setFromQuaternion(quaternion, 'YXZ');
+                const rotDeg = (euler.y * 180 / Math.PI).toFixed(2);
+                
+                log(`補正完了: スケール=${scale.toFixed(4)}, 回転=${rotDeg}度`);
+                
+                setTimeout(() => {
+                    this.marker1.visible = false;
+                    this.marker2.visible = false;
+                }, 2000);
             }
 
             animate() {
@@ -484,10 +601,22 @@
 
         placeBtn.addEventListener('click', () => {
             if (!app.simaData) return;
-            app.isPlaced = false; // 再配置を許可
-            log("ARモードを開始して地面をタップしてください");
+
+            const p1 = document.getElementById('ref-point-1').value;
+            const p2 = document.getElementById('ref-point-2').value;
+            if (p1 === p2) {
+                alert("異なる基準点を2つ選択してください");
+                return;
+            }
+
+            app.placeState = 1;
+            app.mapGroup.visible = false;
+            app.marker1.visible = false;
+            app.marker2.visible = false;
+            
+            document.getElementById('ar-guide-msg').innerText = "1点目の現実位置をタップしてください";
             document.getElementById('ar-overlay').style.display = 'flex';
-            // すでにARセッション中なら、即座に配置待ち状態へ
+            log(`配置開始: [${p1}] と [${p2}] の現実位置を指定します`);
         });
 
         resetBtn.addEventListener('click', () => {
